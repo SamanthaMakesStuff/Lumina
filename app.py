@@ -390,14 +390,25 @@ async def upload_csv(file: UploadFile = File(...),
 
     catalog_books = conn.execute("SELECT id, norm_title, norm_author FROM books").fetchall()
 
-    # ISBN -> book_id lookup for exact matching before the fuzzy fallback. ~82%
-    # of the catalog carries an ISBN-13, so this catches most books precisely and
-    # avoids fuzzy false positives like "The Many" -> "Mandy".
+    # ISBN -> book_id lookup for exact matching, tried BEFORE the fuzzy fallback.
+    # Index every known ISBN per book: the primary books.isbn, plus the full
+    # per-edition lists captured in book_metadata.isbns (both 10- and 13-digit).
+    # That way a reader's shelved edition matches exactly whichever ISBN it is,
+    # and we only fall back to fuzzy title/author when no ISBN matches at all.
     isbn_index = {}
     for r in conn.execute("SELECT id, isbn FROM books WHERE isbn IS NOT NULL AND TRIM(isbn) <> ''"):
         key = normalize_isbn(r["isbn"])
         if key:
-            isbn_index.setdefault(key, r["id"])
+            isbn_index.setdefault(key, r["id"])           # primary wins on any collision
+    for r in conn.execute("SELECT book_id, isbns FROM book_metadata "
+                          "WHERE isbns IS NOT NULL AND TRIM(isbns) <> ''"):
+        try:
+            for x in json.loads(r["isbns"]):
+                key = normalize_isbn(x)
+                if key:
+                    isbn_index.setdefault(key, r["book_id"])
+        except (ValueError, TypeError):
+            pass
 
     counts = {"matched": 0, "ambiguous": 0, "unmatched": 0}
     total_read = 0
